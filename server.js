@@ -6,278 +6,309 @@ require('dotenv').config();
 
 const app = express();
 
-// ============== MIDDLEWARE ==============
+// Middleware
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// ============== MONGODB CONNECTION ==============
+// MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI, {
   useNewUrlParser: true,
-  useUnifiedTopology: true
+  useUnifiedTopology: true,
 })
-.then(() => console.log('✅ MongoDB Atlas Connected'))
-.catch(err => console.error('❌ MongoDB Error:', err));
+.then(() => console.log('✅ MongoDB Connected'))
+.catch(err => console.error('❌ MongoDB Connection Error:', err));
 
-// ============== SENSOR DATA SCHEMA ==============
-const sensorSchema = new mongoose.Schema({
-  soilValue: {
+// Sensor Data Schema
+const sensorDataSchema = new mongoose.Schema({
+  deviceId: {
+    type: String,
+    required: true,
+    index: true
+  },
+  soilMoisture: {
     type: Number,
     required: true
   },
   soilCondition: {
     type: String,
-    enum: ['Good', 'Okay', 'Bad'],
-    required: true
+    required: true,
+    enum: ['Good', 'Okay', 'Bad']
   },
-  ldrValue: {
+  lightLevel: {
     type: Number,
     required: true
   },
   lightCondition: {
     type: String,
-    enum: ['Good', 'Okay', 'Bad'],
-    required: true
+    required: true,
+    enum: ['Good', 'Okay', 'Bad']
   },
   timestamp: {
     type: Date,
-    default: Date.now
-  },
-  alertSent: {
-    type: Boolean,
-    default: false
+    default: Date.now,
+    index: true
   }
 });
 
-const SensorData = mongoose.model('SensorData', sensorSchema);
+const SensorData = mongoose.model('SensorData', sensorDataSchema);
 
-// ============== EMAIL CONFIGURATION ==============
+// Email Configuration (Gmail SMTP)
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
     user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS // App Password, not regular password
+    pass: process.env.EMAIL_APP_PASSWORD
   }
 });
 
-// ============== ALERT FUNCTION ==============
-async function sendAlert(data) {
-  // Only send alert if soil is Bad OR light is Bad
-  if (data.soilCondition === 'Bad' || data.lightCondition === 'Bad') {
-    
-    const mailOptions = {
-      from: process.env.EMAIL_USER,
-      to: 'sthaujwal07@gmail.com',
-      subject: '🚨 Plant Alert - Immediate Attention Required',
-      html: `
-        <div style="font-family: Arial, sans-serif; padding: 20px; background-color: #f5f5f5;">
-          <div style="background-color: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);">
-            <h2 style="color: #d32f2f;">🌱 Plant Monitoring Alert</h2>
-            <p style="font-size: 16px; color: #333;">Your plant needs attention!</p>
-            
-            <div style="background-color: #fff3e0; padding: 15px; border-left: 4px solid #ff9800; margin: 20px 0;">
-              <h3 style="color: #e65100; margin-top: 0;">📊 Current Readings:</h3>
-              
-              <p style="margin: 10px 0;">
-                <strong>Soil Moisture:</strong> ${data.soilValue} 
-                <span style="color: ${data.soilCondition === 'Bad' ? '#d32f2f' : data.soilCondition === 'Okay' ? '#f57c00' : '#388e3c'}; 
-                      font-weight: bold; padding: 3px 8px; border-radius: 3px; background-color: ${data.soilCondition === 'Bad' ? '#ffebee' : data.soilCondition === 'Okay' ? '#fff3e0' : '#e8f5e9'};">
-                  ${data.soilCondition}
-                </span>
-              </p>
-              
-              <p style="margin: 10px 0;">
-                <strong>Light Level:</strong> ${data.ldrValue} 
-                <span style="color: ${data.lightCondition === 'Bad' ? '#d32f2f' : data.lightCondition === 'Okay' ? '#f57c00' : '#388e3c'}; 
-                      font-weight: bold; padding: 3px 8px; border-radius: 3px; background-color: ${data.lightCondition === 'Bad' ? '#ffebee' : data.lightCondition === 'Okay' ? '#fff3e0' : '#e8f5e9'};">
-                  ${data.lightCondition}
-                </span>
-              </p>
-            </div>
-            
-            <div style="background-color: #ffebee; padding: 15px; border-left: 4px solid #d32f2f; margin: 20px 0;">
-              <h3 style="color: #d32f2f; margin-top: 0;">⚠️ Issues Detected:</h3>
-              ${data.soilCondition === 'Bad' ? '<p>❌ <strong>Soil is too dry!</strong> Please water your plant immediately.</p>' : ''}
-              ${data.lightCondition === 'Bad' ? '<p>❌ <strong>Insufficient light!</strong> Move plant to a brighter location.</p>' : ''}
-            </div>
-            
-            <p style="color: #666; font-size: 14px; margin-top: 20px;">
-              <em>Alert sent at: ${new Date().toLocaleString()}</em>
-            </p>
-          </div>
-        </div>
-      `
-    };
+// Alert Tracking (prevent spam)
+let lastAlertTime = 0;
+const ALERT_COOLDOWN = 10 * 60 * 1000; // 10 minutes
 
-    try {
-      await transporter.sendMail(mailOptions);
-      console.log('✅ Alert email sent successfully');
-      return true;
-    } catch (error) {
-      console.error('❌ Email sending failed:', error);
-      return false;
-    }
+// Function to send email alert
+async function sendEmailAlert(data) {
+  const now = Date.now();
+  
+  // Check cooldown to prevent spam
+  if (now - lastAlertTime < ALERT_COOLDOWN) {
+    console.log('⏱️ Alert cooldown active, skipping email');
+    return;
   }
-  return false;
+
+  const alertReasons = [];
+  if (data.soilCondition === 'Bad') {
+    alertReasons.push(`🚨 Soil Moisture: ${data.soilMoisture} (Bad)`);
+  }
+  if (data.lightCondition === 'Bad') {
+    alertReasons.push(`🚨 Light Level: ${data.lightLevel} (Bad)`);
+  }
+
+  if (alertReasons.length === 0) return;
+
+  const mailOptions = {
+    from: process.env.EMAIL_USER,
+    to: 'sthaujwal07@gmail.com',
+    subject: '🚨 Plant Alert - Action Required!',
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: #d32f2f;">🌱 Plant Monitoring Alert</h2>
+        <p style="font-size: 16px;">Your plant needs attention!</p>
+        
+        <div style="background-color: #ffebee; padding: 15px; border-radius: 5px; margin: 20px 0;">
+          <h3 style="color: #c62828; margin-top: 0;">Alert Details:</h3>
+          ${alertReasons.map(reason => `<p style="margin: 5px 0;">• ${reason}</p>`).join('')}
+        </div>
+        
+        <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px;">
+          <h4 style="margin-top: 0;">Current Readings:</h4>
+          <p><strong>Device ID:</strong> ${data.deviceId}</p>
+          <p><strong>Soil Moisture:</strong> ${data.soilMoisture} - ${data.soilCondition}</p>
+          <p><strong>Light Level:</strong> ${data.lightLevel} - ${data.lightCondition}</p>
+          <p><strong>Time:</strong> ${new Date(data.timestamp).toLocaleString()}</p>
+        </div>
+        
+        <p style="margin-top: 20px; color: #666;">
+          Please check your plant and take necessary action.
+        </p>
+      </div>
+    `
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    lastAlertTime = now;
+    console.log('✅ Alert email sent successfully');
+  } catch (error) {
+    console.error('❌ Email alert error:', error);
+  }
 }
 
-// ============== API ENDPOINTS ==============
+// API Routes
 
-// Health check
+// Health Check
 app.get('/', (req, res) => {
-  res.json({ 
-    status: 'online',
-    message: 'Plant Monitoring Backend is running',
-    timestamp: new Date().toISOString()
+  res.json({
+    message: '🌱 Plant Monitor Backend API',
+    status: 'running',
+    endpoints: {
+      health: 'GET /',
+      postData: 'POST /api/sensor-data',
+      latestData: 'GET /api/latest-data',
+      history: 'GET /api/history'
+    }
   });
 });
 
-// POST: Receive sensor data from ESP32
+// POST - Receive sensor data from ESP32
 app.post('/api/sensor-data', async (req, res) => {
   try {
-    const { soilValue, soilCondition, ldrValue, lightCondition } = req.body;
+    const { deviceId, soilMoisture, soilCondition, lightLevel, lightCondition } = req.body;
 
     // Validation
-    if (!soilValue || !soilCondition || !ldrValue || !lightCondition) {
-      return res.status(400).json({ 
+    if (!deviceId || soilMoisture === undefined || !soilCondition || 
+        lightLevel === undefined || !lightCondition) {
+      return res.status(400).json({
         success: false,
-        error: 'Missing required fields' 
+        message: 'Missing required fields'
       });
     }
 
     // Validate condition values
-    if (!['Good', 'Okay', 'Bad'].includes(soilCondition) || 
-        !['Good', 'Okay', 'Bad'].includes(lightCondition)) {
-      return res.status(400).json({ 
+    const validConditions = ['Good', 'Okay', 'Bad'];
+    if (!validConditions.includes(soilCondition) || !validConditions.includes(lightCondition)) {
+      return res.status(400).json({
         success: false,
-        error: 'Invalid condition values' 
+        message: 'Invalid condition values. Must be: Good, Okay, or Bad'
       });
     }
 
     // Save to database
     const sensorData = new SensorData({
-      soilValue: parseInt(soilValue),
+      deviceId,
+      soilMoisture: Number(soilMoisture),
       soilCondition,
-      ldrValue: parseInt(ldrValue),
-      lightCondition
+      lightLevel: Number(lightLevel),
+      lightCondition,
+      timestamp: new Date()
     });
 
     await sensorData.save();
-    console.log('📊 Sensor data saved:', sensorData);
+    console.log('✅ Data saved:', sensorData);
 
-    // Send alert if needed
-    const alertSent = await sendAlert(sensorData);
-    
-    if (alertSent) {
-      sensorData.alertSent = true;
-      await sensorData.save();
+    // Check for bad conditions and send alert
+    if (soilCondition === 'Bad' || lightCondition === 'Bad') {
+      console.log('⚠️ Bad condition detected, sending alert...');
+      sendEmailAlert(sensorData); // Non-blocking
     }
 
-    res.status(201).json({ 
+    res.status(201).json({
       success: true,
-      message: 'Data received successfully',
-      alertSent,
+      message: 'Sensor data received successfully',
       data: sensorData
     });
 
   } catch (error) {
-    console.error('Error saving sensor data:', error);
-    res.status(500).json({ 
+    console.error('❌ Error saving sensor data:', error);
+    res.status(500).json({
       success: false,
-      error: 'Internal server error' 
+      message: 'Server error',
+      error: error.message
     });
   }
 });
 
-// GET: Latest sensor data for frontend
+// GET - Latest sensor data
 app.get('/api/latest-data', async (req, res) => {
   try {
-    const latestData = await SensorData.findOne()
+    const { deviceId } = req.query;
+    
+    const query = deviceId ? { deviceId } : {};
+    const latestData = await SensorData.findOne(query)
       .sort({ timestamp: -1 })
       .limit(1);
 
     if (!latestData) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
-        message: 'No data available yet' 
+        message: 'No data found'
       });
     }
 
-    res.json({ 
+    res.json({
       success: true,
-      data: latestData 
+      data: latestData
     });
 
   } catch (error) {
-    console.error('Error fetching latest data:', error);
-    res.status(500).json({ 
+    console.error('❌ Error fetching latest data:', error);
+    res.status(500).json({
       success: false,
-      error: 'Internal server error' 
+      message: 'Server error',
+      error: error.message
     });
   }
 });
 
-// GET: Historical data (optional - for charts)
+// GET - Historical data
 app.get('/api/history', async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 50;
-    const hours = parseInt(req.query.hours) || 24;
+    const { deviceId, limit = 50, hours = 24 } = req.query;
+    
+    const timeLimit = new Date(Date.now() - (hours * 60 * 60 * 1000));
+    const query = {
+      timestamp: { $gte: timeLimit }
+    };
+    
+    if (deviceId) {
+      query.deviceId = deviceId;
+    }
 
-    const timeAgo = new Date(Date.now() - hours * 60 * 60 * 1000);
+    const history = await SensorData.find(query)
+      .sort({ timestamp: -1 })
+      .limit(parseInt(limit));
 
-    const history = await SensorData.find({
-      timestamp: { $gte: timeAgo }
-    })
-    .sort({ timestamp: -1 })
-    .limit(limit);
-
-    res.json({ 
+    res.json({
       success: true,
       count: history.length,
-      data: history 
+      data: history
     });
 
   } catch (error) {
-    console.error('Error fetching history:', error);
-    res.status(500).json({ 
+    console.error('❌ Error fetching history:', error);
+    res.status(500).json({
       success: false,
-      error: 'Internal server error' 
+      message: 'Server error',
+      error: error.message
     });
   }
 });
 
-// GET: Statistics
+// GET - Statistics
 app.get('/api/stats', async (req, res) => {
   try {
-    const total = await SensorData.countDocuments();
-    const alertsCount = await SensorData.countDocuments({ alertSent: true });
-    const latest = await SensorData.findOne().sort({ timestamp: -1 });
+    const { deviceId } = req.query;
+    const query = deviceId ? { deviceId } : {};
+
+    const totalReadings = await SensorData.countDocuments(query);
+    const goodConditions = await SensorData.countDocuments({
+      ...query,
+      soilCondition: 'Good',
+      lightCondition: 'Good'
+    });
+    const badConditions = await SensorData.countDocuments({
+      ...query,
+      $or: [
+        { soilCondition: 'Bad' },
+        { lightCondition: 'Bad' }
+      ]
+    });
 
     res.json({
       success: true,
       stats: {
-        totalReadings: total,
-        totalAlerts: alertsCount,
-        lastUpdate: latest ? latest.timestamp : null,
-        currentStatus: latest ? {
-          soil: latest.soilCondition,
-          light: latest.lightCondition
-        } : null
+        totalReadings,
+        goodConditions,
+        badConditions,
+        healthScore: totalReadings > 0 
+          ? Math.round((goodConditions / totalReadings) * 100) 
+          : 0
       }
     });
 
   } catch (error) {
-    console.error('Error fetching stats:', error);
-    res.status(500).json({ 
+    console.error('❌ Error fetching stats:', error);
+    res.status(500).json({
       success: false,
-      error: 'Internal server error' 
+      message: 'Server error',
+      error: error.message
     });
   }
 });
 
-// ============== START SERVER ==============
+// Start Server
 const PORT = process.env.PORT || 3000;
-
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📡 Ready to receive ESP32 data`);
+  console.log(`📡 Ready to receive data from ESP32`);
 });
