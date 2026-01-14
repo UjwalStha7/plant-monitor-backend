@@ -15,6 +15,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors({
   origin: [
     'https://plant-monitor-frontend-mu.vercel.app',
+    'https://plant-monitor-frontend-pz11nbcxi-ujwal-shresthas-projects.vercel.app',
     'http://localhost:3000', 
     'http://localhost:3001'
   ],
