@@ -12,17 +12,28 @@ const PORT = process.env.PORT || 3000;
 
 // ============== Middleware ==============
 // FIXED CORS - Specific for your Vercel frontend + ESP32
+// app.use(cors({
+//   origin: [
+//     'https://plant-monitor-frontend-mu.vercel.app',
+//     /\.vercel\.app$/,  // ← Allow ALL Vercel preview URLs
+//     'http://localhost:3000',
+//     'http://localhost:3001'
+//   ],
+//   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+//   allowedHeaders: ['Content-Type', 'Accept', 'Authorization'],
+//   credentials: true
+// }));
 app.use(cors({
   origin: [
-    'https://plant-monitor-frontend-mu.vercel.app',
-    /\.vercel\.app$/,  // ← Allow ALL Vercel preview URLs
-    'http://localhost:3000',
-    'http://localhost:3001'
+    'https://id-preview--94c0bc02-ed71-4d03-8489-519125e34bbf.lovable.app',
+    'https://your-vercel-app.vercel.app',
+    'http://localhost:5173'
   ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Accept', 'Authorization'],
   credentials: true
 }));
+
 
 // Parse JSON bodies
 app.use(express.json({ limit: '10mb' }));
