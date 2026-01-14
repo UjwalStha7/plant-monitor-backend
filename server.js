@@ -1,6 +1,6 @@
 // ============================================================
-// PLANT MONITOR BACKEND - RENDER READY (IN-MEMORY VERSION)
-// Copy this ENTIRE file to replace your server.js - NO DATABASE SETUP REQUIRED!
+// PLANT MONITOR BACKEND - VERCEL READY (IN-MEMORY VERSION)
+// Copy this ENTIRE file to replace your server.js - FULLY FIXED!
 // ============================================================
 
 const express = require('express');
@@ -11,9 +11,13 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ============== Middleware ==============
-// Enable CORS for ESP32 and frontend
+// FIXED CORS - Specific for your Vercel frontend + ESP32
 app.use(cors({
-  origin: '*',
+  origin: [
+    'https://plant-monitor-frontend-mu.vercel.app',
+    'http://localhost:3000', 
+    'http://localhost:3001'
+  ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Accept', 'Authorization'],
   credentials: true
@@ -46,7 +50,7 @@ app.get('/', (req, res) => {
   res.json({
     status: 'online',
     message: '🌱 Plant Monitor API is running!',
-    version: '2.2.0-MEMORY',
+    version: '2.3.0-VERCEL',
     timestamp: new Date().toISOString(),
     statistics: {
       totalReadings: readings.length,
@@ -56,7 +60,7 @@ app.get('/', (req, res) => {
   });
 });
 
-// POST - ESP32 sends data here
+// POST - ESP32 sends data here (KEEP SAME)
 app.post('/api/readings', (req, res) => {
   try {
     console.log('\n========================================');
@@ -116,31 +120,33 @@ app.post('/api/readings', (req, res) => {
   }
 });
 
-// GET - Frontend fetches from here
-app.get('/api/readings', (req, res) => {
+// ✅ NEW/ FIXED: Frontend fetches ALL data from here
+app.get('/api/sensor-data', (req, res) => {
   try {
+    console.log('📱 Frontend requesting sensor data');
     const limit = parseInt(req.query.limit) || 50;
-    const deviceId = req.query.deviceId;
-    
-    let filtered = readings;
-    if (deviceId) {
-      filtered = readings.filter(r => r.deviceId === deviceId);
-    }
-    
-    const result = filtered.slice(0, limit);
     
     res.json({
       success: true,
-      count: result.length,
-      total: filtered.length,
-      readings: result
+      timestamp: new Date().toISOString(),
+      count: readings.length,
+      latest: readings[0],
+      data: readings.slice(0, limit).map(r => ({
+        soilValue: r.soilValue,
+        ldrValue: r.ldrValue,
+        soilCondition: r.soilCondition,
+        lightCondition: r.lightCondition,
+        timestamp: r.receivedAt,
+        deviceId: r.deviceId
+      }))
     });
   } catch (error) {
+    console.error('Error fetching data:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Latest reading
+// Latest reading (KEEP)
 app.get('/api/readings/latest', (req, res) => {
   const deviceId = req.query.deviceId;
   let latest = readings[0];
@@ -166,15 +172,16 @@ app.use((req, res) => {
   res.status(404).json({ success: false, error: 'Not found' });
 });
 
-// START SERVER
+// Vercel serverless function export (REQUIRED FOR VERCEL)
+module.exports = app;
+
+// START SERVER (Traditional hosting)
 app.listen(PORT, () => {
   console.log('\n' + '='.repeat(60));
-  console.log('🌱 PLANT MONITOR API v2.2 (In-Memory)');
+  console.log('🌱 PLANT MONITOR API v2.3 (Vercel Ready)');
   console.log('='.repeat(60));
   console.log(`🚀 Running on port ${PORT}`);
-  console.log(`📍 Test: https://plant-monitor-api.onrender.com/api/test`);
-  console.log(`📥 ESP32: POST /api/readings`);
-  console.log(`📱 Frontend: GET /api/readings`);
+  console.log(`📱 Frontend endpoint: /api/sensor-data`);
+  console.log(`📥 ESP32 POST: /api/readings`);
   console.log('='.repeat(60));
-  console.log('✅ READY! No database setup needed!');
 });
