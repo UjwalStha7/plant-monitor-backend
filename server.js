@@ -1,347 +1,265 @@
-// server.js - Main Backend Server
-require('dotenv').config();
-const express = require('express');
-const mongoose = require('mongoose');
-const cors = require('cors');
-const nodemailer = require('nodemailer');
+// server.js - Plant Monitor Backend API
+// This is what your backend SHOULD look like
 
+const express = require('express');
+const cors = require('cors');
 const app = express();
+
+// ============== Configuration ==============
 const PORT = process.env.PORT || 3000;
 
-// Middleware
-app.use(cors());
+// ============== Middleware ==============
+// CRITICAL: Enable CORS for ESP32 and frontend
+app.use(cors({
+  origin: '*', // Allow all origins (adjust for production)
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Accept']
+}));
+
+// Parse JSON bodies
 app.use(express.json());
 
-// MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-})
-.then(() => console.log('✅ MongoDB Connected'))
-.catch(err => console.error('❌ MongoDB Connection Error:', err));
-
-// ============== SCHEMAS ==============
-
-// Sensor Data Schema
-const sensorDataSchema = new mongoose.Schema({
-  deviceId: {
-    type: String,
-    required: true,
-    default: 'ESP32_001'
-  },
-  soilValue: {
-    type: Number,
-    required: true
-  },
-  ldrValue: {
-    type: Number,
-    required: true
-  },
-  soilCondition: {
-    type: String,
-    enum: ['Good', 'Okay', 'Bad'],
-    required: true
-  },
-  lightCondition: {
-    type: String,
-    enum: ['Good', 'Okay', 'Bad'],
-    required: true
-  },
-  timestamp: {
-    type: Date,
-    default: Date.now
+// Request logging
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  console.log('Headers:', req.headers);
+  if (req.body && Object.keys(req.body).length > 0) {
+    console.log('Body:', JSON.stringify(req.body, null, 2));
   }
+  next();
 });
 
-const SensorData = mongoose.model('SensorData', sensorDataSchema);
+// ============== In-Memory Storage ==============
+// For production, use MongoDB or PostgreSQL
+let readings = [];
+const MAX_READINGS = 1000; // Keep last 1000 readings
 
-// Device Status Schema
-const deviceStatusSchema = new mongoose.Schema({
-  deviceId: {
-    type: String,
-    required: true,
-    unique: true
-  },
-  status: {
-    type: String,
-    enum: ['online', 'offline'],
-    default: 'offline'
-  },
-  lastSeen: {
-    type: Date,
-    default: Date.now
-  }
-});
+// ============== API Routes ==============
 
-const DeviceStatus = mongoose.model('DeviceStatus', deviceStatusSchema);
-
-// ============== EMAIL CONFIGURATION ==============
-
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS // Use App Password, not regular password
-  }
-});
-
-// Email tracking to avoid spam
-let lastEmailSent = {
-  soil: 0,
-  light: 0
-};
-
-const EMAIL_COOLDOWN = 5 * 60 * 1000; // 5 minutes between same alert type
-
-async function sendAlert(type, value, condition) {
-  const now = Date.now();
-  
-  // Check cooldown
-  if (now - lastEmailSent[type] < EMAIL_COOLDOWN) {
-    console.log(`⏳ Email cooldown active for ${type}`);
-    return;
-  }
-
-  const subject = type === 'soil' 
-    ? '🚨 Alert: Low Soil Moisture Detected!' 
-    : '🚨 Alert: Poor Light Condition Detected!';
-  
-  const message = type === 'soil'
-    ? `⚠️ Your plant needs water!\n\nSoil Moisture Value: ${value}\nCondition: ${condition}\n\nPlease water your plant soon.`
-    : `⚠️ Your plant needs more light!\n\nLight Value: ${value}\nCondition: ${condition}\n\nPlease move your plant to a brighter location.`;
-
-  const mailOptions = {
-    from: process.env.EMAIL_USER,
-    to: 'sthaujwal07@gmail.com',
-    subject: subject,
-    text: message
-  };
-
-  try {
-    await transporter.sendMail(mailOptions);
-    lastEmailSent[type] = now;
-    console.log(`✅ ${type} alert email sent successfully`);
-  } catch (error) {
-    console.error(`❌ Email error:`, error);
-  }
-}
-
-// ============== API ROUTES ==============
-
-// Health Check
-app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    message: 'Backend is running',
-    timestamp: new Date().toISOString()
+// Health check - TEST THIS FIRST
+app.get('/', (req, res) => {
+  res.json({
+    status: 'online',
+    message: 'Plant Monitor API is running',
+    timestamp: new Date().toISOString(),
+    totalReadings: readings.length,
+    endpoints: {
+      health: 'GET /',
+      postReading: 'POST /api/readings',
+      getAllReadings: 'GET /api/readings',
+      getLatest: 'GET /api/readings/latest',
+      getByDevice: 'GET /api/readings/:deviceId'
+    }
   });
 });
 
-// POST - Receive sensor data from ESP32
-app.post('/api/sensor-data', async (req, res) => {
+// POST endpoint - ESP32 sends data here
+app.post('/api/readings', (req, res) => {
   try {
-    const { deviceId, soilValue, ldrValue, soilCondition, lightCondition } = req.body;
-
+    console.log('\n=== NEW READING RECEIVED ===');
+    console.log('From IP:', req.ip);
+    console.log('Data:', req.body);
+    
+    const { 
+      deviceId, 
+      soilValue, 
+      ldrValue, 
+      soilCondition, 
+      lightCondition,
+      wifiRSSI,
+      freeHeap,
+      sendAttempt
+    } = req.body;
+    
     // Validate required fields
-    if (!soilValue || !ldrValue || !soilCondition || !lightCondition) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Missing required fields' 
+    if (!deviceId || soilValue === undefined || ldrValue === undefined) {
+      console.error('❌ Missing required fields');
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: deviceId, soilValue, ldrValue'
       });
-    }
-
-    // Save sensor data
-    const sensorData = new SensorData({
-      deviceId: deviceId || 'ESP32_001',
-      soilValue,
-      ldrValue,
-      soilCondition,
-      lightCondition
-    });
-
-    await sensorData.save();
-
-    // Update device status
-    await DeviceStatus.findOneAndUpdate(
-      { deviceId: deviceId || 'ESP32_001' },
-      { 
-        status: 'online',
-        lastSeen: new Date()
-      },
-      { upsert: true, new: true }
-    );
-
-    // Check for alerts
-    if (soilCondition === 'Bad') {
-      await sendAlert('soil', soilValue, soilCondition);
     }
     
-    if (lightCondition === 'Bad') {
-      await sendAlert('light', ldrValue, lightCondition);
-    }
-
-    res.json({ 
-      success: true, 
-      message: 'Data received successfully',
-      data: sensorData
-    });
-
-  } catch (error) {
-    console.error('Error saving sensor data:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error',
-      error: error.message
-    });
-  }
-});
-
-// GET - Latest sensor reading
-app.get('/api/sensor-data/latest', async (req, res) => {
-  try {
-    const latestData = await SensorData.findOne()
-      .sort({ timestamp: -1 })
-      .limit(1);
-
-    if (!latestData) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'No data found' 
-      });
-    }
-
-    res.json({ 
-      success: true, 
-      data: latestData 
-    });
-
-  } catch (error) {
-    console.error('Error fetching latest data:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error' 
-    });
-  }
-});
-
-// GET - Historical data (last 24 hours)
-app.get('/api/sensor-data/history', async (req, res) => {
-  try {
-    const limit = parseInt(req.query.limit) || 100;
-    const hours = parseInt(req.query.hours) || 24;
+    // Create reading object
+    const reading = {
+      id: Date.now().toString(),
+      deviceId,
+      soilValue: parseInt(soilValue),
+      ldrValue: parseInt(ldrValue),
+      soilCondition: soilCondition || 'Unknown',
+      lightCondition: lightCondition || 'Unknown',
+      wifiRSSI: wifiRSSI || null,
+      freeHeap: freeHeap || null,
+      sendAttempt: sendAttempt || null,
+      receivedAt: new Date().toISOString(),
+      timestamp: req.body.timestamp || Date.now()
+    };
     
-    const startTime = new Date();
-    startTime.setHours(startTime.getHours() - hours);
-
-    const historicalData = await SensorData.find({
-      timestamp: { $gte: startTime }
-    })
-    .sort({ timestamp: -1 })
-    .limit(limit);
-
-    res.json({ 
-      success: true, 
-      count: historicalData.length,
-      data: historicalData 
-    });
-
-  } catch (error) {
-    console.error('Error fetching historical data:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error' 
-    });
-  }
-});
-
-// GET - Device status
-app.get('/api/device/status', async (req, res) => {
-  try {
-    const deviceId = req.query.deviceId || 'ESP32_001';
-    let device = await DeviceStatus.findOne({ deviceId });
-
-    if (!device) {
-      device = await DeviceStatus.create({ 
-        deviceId, 
-        status: 'offline' 
-      });
+    // Add to storage
+    readings.unshift(reading); // Add to beginning
+    
+    // Keep only last MAX_READINGS
+    if (readings.length > MAX_READINGS) {
+      readings = readings.slice(0, MAX_READINGS);
     }
-
-    // Check if device is offline (no data for 30 seconds)
-    const thirtySecondsAgo = new Date(Date.now() - 30000);
-    if (device.lastSeen < thirtySecondsAgo && device.status === 'online') {
-      device.status = 'offline';
-      await device.save();
-    }
-
-    res.json({ 
-      success: true, 
-      data: {
-        deviceId: device.deviceId,
-        status: device.status,
-        lastSeen: device.lastSeen
-      }
-    });
-
-  } catch (error) {
-    console.error('Error fetching device status:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error' 
-    });
-  }
-});
-
-// GET - Statistics
-app.get('/api/stats', async (req, res) => {
-  try {
-    const totalReadings = await SensorData.countDocuments();
-    const latestData = await SensorData.findOne().sort({ timestamp: -1 });
-    const device = await DeviceStatus.findOne({ deviceId: 'ESP32_001' });
-
-    res.json({
+    
+    console.log('✅ Reading saved successfully');
+    console.log('Total readings:', readings.length);
+    console.log('============================\n');
+    
+    // Send success response
+    res.status(201).json({
       success: true,
-      data: {
-        totalReadings,
-        latestReading: latestData,
-        deviceStatus: device ? device.status : 'offline',
-        lastSeen: device ? device.lastSeen : null
-      }
+      message: 'Reading received successfully',
+      reading: reading,
+      totalReadings: readings.length
     });
-
+    
   } catch (error) {
-    console.error('Error fetching stats:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error' 
+    console.error('❌ Error processing reading:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+      message: error.message
     });
   }
 });
 
-// ============== BACKGROUND TASKS ==============
-
-// Check device status every 30 seconds
-setInterval(async () => {
-  try {
-    const thirtySecondsAgo = new Date(Date.now() - 30000);
-    
-    await DeviceStatus.updateMany(
-      { 
-        lastSeen: { $lt: thirtySecondsAgo },
-        status: 'online'
-      },
-      { 
-        status: 'offline' 
-      }
-    );
-  } catch (error) {
-    console.error('Error updating device status:', error);
+// GET all readings
+app.get('/api/readings', (req, res) => {
+  const limit = parseInt(req.query.limit) || 100;
+  const deviceId = req.query.deviceId;
+  
+  let filteredReadings = readings;
+  
+  // Filter by deviceId if provided
+  if (deviceId) {
+    filteredReadings = readings.filter(r => r.deviceId === deviceId);
   }
-}, 30000);
+  
+  res.json({
+    success: true,
+    count: filteredReadings.length,
+    readings: filteredReadings.slice(0, limit)
+  });
+});
 
-// ============== START SERVER ==============
+// GET latest reading
+app.get('/api/readings/latest', (req, res) => {
+  const deviceId = req.query.deviceId;
+  
+  let latestReading;
+  
+  if (deviceId) {
+    latestReading = readings.find(r => r.deviceId === deviceId);
+  } else {
+    latestReading = readings[0];
+  }
+  
+  if (!latestReading) {
+    return res.status(404).json({
+      success: false,
+      message: 'No readings found'
+    });
+  }
+  
+  res.json({
+    success: true,
+    reading: latestReading
+  });
+});
+
+// GET readings by device
+app.get('/api/readings/:deviceId', (req, res) => {
+  const { deviceId } = req.params;
+  const limit = parseInt(req.query.limit) || 100;
+  
+  const deviceReadings = readings
+    .filter(r => r.deviceId === deviceId)
+    .slice(0, limit);
+  
+  if (deviceReadings.length === 0) {
+    return res.status(404).json({
+      success: false,
+      message: `No readings found for device: ${deviceId}`
+    });
+  }
+  
+  res.json({
+    success: true,
+    deviceId,
+    count: deviceReadings.length,
+    readings: deviceReadings
+  });
+});
+
+// DELETE all readings (for testing)
+app.delete('/api/readings', (req, res) => {
+  const count = readings.length;
+  readings = [];
+  
+  res.json({
+    success: true,
+    message: `Deleted ${count} readings`
+  });
+});
+
+// ============== Error Handling ==============
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    error: 'Endpoint not found',
+    path: req.path,
+    availableEndpoints: [
+      'GET /',
+      'POST /api/readings',
+      'GET /api/readings',
+      'GET /api/readings/latest',
+      'GET /api/readings/:deviceId'
+    ]
+  });
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({
+    success: false,
+    error: 'Internal server error',
+    message: err.message
+  });
+});
+
+// ============== Start Server ==============
 
 app.listen(PORT, () => {
+  console.log('\n' + '='.repeat(50));
+  console.log('🌱 PLANT MONITOR API SERVER');
+  console.log('='.repeat(50));
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📡 Backend URL: http://localhost:${PORT}`);
+  console.log(`📡 URL: http://localhost:${PORT}`);
+  console.log(`\n📋 Available endpoints:`);
+  console.log(`   GET  /                        - Health check`);
+  console.log(`   POST /api/readings            - Add reading`);
+  console.log(`   GET  /api/readings            - Get all readings`);
+  console.log(`   GET  /api/readings/latest     - Get latest reading`);
+  console.log(`   GET  /api/readings/:deviceId  - Get device readings`);
+  console.log('='.repeat(50) + '\n');
+  console.log('🎯 Ready to receive data from ESP32!');
+  console.log('💡 Test with: curl http://localhost:' + PORT);
+  console.log('\n');
+});
+
+// ============== Graceful Shutdown ==============
+
+process.on('SIGTERM', () => {
+  console.log('SIGTERM signal received: closing HTTP server');
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('\nSIGINT signal received: closing HTTP server');
+  process.exit(0);
 });
