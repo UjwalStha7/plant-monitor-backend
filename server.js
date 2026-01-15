@@ -1,28 +1,100 @@
 // ============================================================
-// PLANT MONITOR BACKEND - VERCEL READY (IN-MEMORY VERSION)
-// Copy this ENTIRE file to replace your server.js - FULLY FIXED!
+// PLANT MONITOR BACKEND - MONGODB + EMAIL ALERTS
 // ============================================================
 
 const express = require('express');
 const cors = require('cors');
+const mongoose = require('mongoose');
+const nodemailer = require('nodemailer');
 const app = express();
 
 // ============== Configuration ==============
 const PORT = process.env.PORT || 3000;
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://plantuser:ukdjs12345@plant-monitoring.vvaq3h6.mongodb.net/plant-monitor?retryWrites=true&w=majority';
+const EMAIL_USER = process.env.EMAIL_USER; // Add to Render env vars
+const EMAIL_PASS = process.env.EMAIL_PASS; // Add to Render env vars
+const ALERT_EMAIL = 'sthaujwal07@gmail.com';
+
+// ============== MongoDB Connection ==============
+mongoose.connect(MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+})
+.then(() => console.log('✅ MongoDB Connected'))
+.catch(err => console.error('❌ MongoDB Error:', err));
+
+// ============== Mongoose Schema ==============
+const readingSchema = new mongoose.Schema({
+  deviceId: { type: String, required: true, index: true },
+  soilValue: { type: Number, required: true },
+  ldrValue: { type: Number, required: true },
+  soilCondition: { type: String, required: true },
+  lightCondition: { type: String, required: true },
+  wifiRSSI: Number,
+  freeHeap: Number,
+  sendAttempt: Number,
+  receivedAt: { type: Date, default: Date.now, index: true }
+}, {
+  timestamps: true // Adds createdAt and updatedAt automatically
+});
+
+const Reading = mongoose.model('Reading', readingSchema);
+
+// ============== Email Configuration ==============
+let transporter;
+if (EMAIL_USER && EMAIL_PASS) {
+  transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: EMAIL_USER,
+      pass: EMAIL_PASS // Use App Password for Gmail
+    }
+  });
+}
+
+// Track last alert time to prevent spam
+let lastAlertTime = 0;
+const ALERT_COOLDOWN = 30 * 60 * 1000; // 30 minutes
+
+async function sendAlert(reading) {
+  if (!transporter) {
+    console.log('⚠️ Email not configured');
+    return;
+  }
+
+  const now = Date.now();
+  if (now - lastAlertTime < ALERT_COOLDOWN) {
+    console.log('⏳ Alert cooldown active');
+    return;
+  }
+
+  try {
+    const subject = '🚨 Plant Monitor Alert';
+    const html = `
+      <h2>⚠️ Plant Needs Attention!</h2>
+      <p><strong>Device:</strong> ${reading.deviceId}</p>
+      <p><strong>Soil Condition:</strong> ${reading.soilCondition} (${reading.soilValue})</p>
+      <p><strong>Light Condition:</strong> ${reading.lightCondition} (${reading.ldrValue})</p>
+      <p><strong>Time:</strong> ${new Date(reading.receivedAt).toLocaleString()}</p>
+      <hr>
+      <p><em>Check your plant immediately!</em></p>
+    `;
+
+    await transporter.sendMail({
+      from: EMAIL_USER,
+      to: ALERT_EMAIL,
+      subject,
+      html
+    });
+
+    lastAlertTime = now;
+    console.log('📧 Alert email sent!');
+  } catch (error) {
+    console.error('❌ Email error:', error.message);
+  }
+}
 
 // ============== Middleware ==============
-// FIXED CORS - Specific for your Vercel frontend + ESP32
-// app.use(cors({
-//   origin: [
-//     'https://plant-monitor-frontend-mu.vercel.app',
-//     /\.vercel\.app$/,  // ← Allow ALL Vercel preview URLs
-//     'http://localhost:3000',
-//     'http://localhost:3001'
-//   ],
-//   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-//   allowedHeaders: ['Content-Type', 'Accept', 'Authorization'],
-//   credentials: true
-// }));
 app.use(cors({
   origin: [
     'https://plant-monitor-frontend-mu.vercel.app',
@@ -35,8 +107,6 @@ app.use(cors({
   credentials: true
 }));
 
-
-// Parse JSON bodies
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -51,30 +121,32 @@ app.use((req, res, next) => {
   next();
 });
 
-// ============== In-Memory Storage ==============
-let readings = [];
-const MAX_READINGS = 1000;
-let devices = {};
-
 // ============== ROUTES ==============
 
 // Health Check
-app.get('/', (req, res) => {
-  res.json({
-    status: 'online',
-    message: '🌱 Plant Monitor API is running!',
-    version: '2.3.0-VERCEL',
-    timestamp: new Date().toISOString(),
-    statistics: {
-      totalReadings: readings.length,
-      totalDevices: Object.keys(devices).length,
-      latestReading: readings[0]?.receivedAt || null
-    }
-  });
+app.get('/', async (req, res) => {
+  try {
+    const totalReadings = await Reading.countDocuments();
+    const latestReading = await Reading.findOne().sort({ receivedAt: -1 });
+    
+    res.json({
+      status: 'online',
+      message: '🌱 Plant Monitor API is running!',
+      version: '3.0.0-MONGODB',
+      timestamp: new Date().toISOString(),
+      database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+      statistics: {
+        totalReadings,
+        latestReading: latestReading?.receivedAt || null
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// POST - ESP32 sends data here (KEEP SAME)
-app.post('/api/readings', (req, res) => {
+// ✅ ESP32 POST endpoint
+app.post('/api/readings', async (req, res) => {
   try {
     console.log('\n========================================');
     console.log('📥 NEW READING FROM ESP32');
@@ -82,16 +154,15 @@ app.post('/api/readings', (req, res) => {
     
     const { 
       deviceId, soilValue, ldrValue, soilCondition, lightCondition,
-      wifiRSSI, freeHeap, sendAttempt, timestamp
+      wifiRSSI, freeHeap, sendAttempt
     } = req.body;
     
     if (!deviceId) {
       return res.status(400).json({ success: false, error: 'Missing deviceId' });
     }
     
-    // Create reading
-    const reading = {
-      id: `reading_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+    // Create and save reading to MongoDB
+    const reading = new Reading({
       deviceId,
       soilValue: parseInt(soilValue),
       ldrValue: parseInt(ldrValue),
@@ -100,31 +171,26 @@ app.post('/api/readings', (req, res) => {
       wifiRSSI: wifiRSSI ? parseInt(wifiRSSI) : null,
       freeHeap: freeHeap ? parseInt(freeHeap) : null,
       sendAttempt: sendAttempt ? parseInt(sendAttempt) : null,
-      receivedAt: new Date().toISOString(),
-      timestamp: timestamp || Date.now()
-    };
+      receivedAt: new Date()
+    });
     
-    // Store (newest first)
-    readings.unshift(reading);
-    if (readings.length > MAX_READINGS) {
-      readings = readings.slice(0, MAX_READINGS);
+    await reading.save();
+    
+    console.log('✅ SAVED TO MONGODB:', deviceId, 'Soil:', soilValue, 'Light:', ldrValue);
+    
+    // Check if alert needed
+    if (soilCondition === 'Bad' || lightCondition === 'Bad') {
+      console.log('⚠️ Bad condition detected, sending alert...');
+      await sendAlert(reading);
     }
     
-    // Update device info
-    if (!devices[deviceId]) {
-      devices[deviceId] = { deviceId, firstSeen: new Date().toISOString(), totalReadings: 0 };
-    }
-    devices[deviceId].lastSeen = new Date().toISOString();
-    devices[deviceId].totalReadings++;
-    devices[deviceId].lastReading = reading;
-    
-    console.log('✅ SAVED:', deviceId, 'Soil:', soilValue, 'Light:', ldrValue);
+    const totalReadings = await Reading.countDocuments();
     
     res.status(201).json({
       success: true,
-      message: 'Data saved!',
+      message: 'Data saved to database!',
       reading,
-      stats: { totalReadings: readings.length }
+      stats: { totalReadings }
     });
     
   } catch (error) {
@@ -133,18 +199,47 @@ app.post('/api/readings', (req, res) => {
   }
 });
 
-// ✅ NEW/ FIXED: Frontend fetches ALL data from here
-app.get('/api/sensor-data', (req, res) => {
+// ✅ FRONTEND GET endpoint
+app.get('/api/sensor-data', async (req, res) => {
   try {
     console.log('📱 Frontend requesting sensor data');
     const limit = parseInt(req.query.limit) || 50;
+    const deviceId = req.query.deviceId;
+    
+    // Build query
+    const query = deviceId ? { deviceId } : {};
+    
+    // Get readings from MongoDB (newest first)
+    const readings = await Reading.find(query)
+      .sort({ receivedAt: -1 })
+      .limit(limit);
+    
+    // Get latest reading
+    const latest = readings[0];
+    
+    // Calculate device status (connected if data within 2 minutes)
+    let deviceStatus = 'Disconnected';
+    if (latest) {
+      const timeSinceLastReading = Date.now() - new Date(latest.receivedAt).getTime();
+      const twoMinutes = 2 * 60 * 1000;
+      deviceStatus = timeSinceLastReading < twoMinutes ? 'Connected' : 'Disconnected';
+    }
     
     res.json({
       success: true,
       timestamp: new Date().toISOString(),
       count: readings.length,
-      latest: readings[0],
-      data: readings.slice(0, limit).map(r => ({
+      deviceStatus, // ← Frontend can use this
+      latest: latest ? {
+        soilValue: latest.soilValue,
+        ldrValue: latest.ldrValue,
+        soilCondition: latest.soilCondition,
+        lightCondition: latest.lightCondition,
+        timestamp: latest.receivedAt,
+        deviceId: latest.deviceId,
+        lastUpdated: latest.updatedAt || latest.receivedAt // ← For "Last updated" UI
+      } : null,
+      data: readings.map(r => ({
         soilValue: r.soilValue,
         ldrValue: r.ldrValue,
         soilCondition: r.soilCondition,
@@ -159,20 +254,50 @@ app.get('/api/sensor-data', (req, res) => {
   }
 });
 
-// Latest reading (KEEP)
-app.get('/api/readings/latest', (req, res) => {
-  const deviceId = req.query.deviceId;
-  let latest = readings[0];
-  
-  if (deviceId) {
-    latest = readings.find(r => r.deviceId === deviceId);
+// Latest reading only
+app.get('/api/readings/latest', async (req, res) => {
+  try {
+    const deviceId = req.query.deviceId;
+    const query = deviceId ? { deviceId } : {};
+    
+    const latest = await Reading.findOne(query).sort({ receivedAt: -1 });
+    
+    if (!latest) {
+      return res.status(404).json({ success: false, message: 'No data yet' });
+    }
+    
+    // Calculate device status
+    const timeSinceLastReading = Date.now() - new Date(latest.receivedAt).getTime();
+    const twoMinutes = 2 * 60 * 1000;
+    const deviceStatus = timeSinceLastReading < twoMinutes ? 'Connected' : 'Disconnected';
+    
+    res.json({ 
+      success: true, 
+      reading: latest,
+      deviceStatus,
+      lastUpdated: latest.updatedAt || latest.receivedAt
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
   }
-  
-  if (!latest) {
-    return res.status(404).json({ success: false, message: 'No data yet' });
+});
+
+// Delete old readings (cleanup endpoint)
+app.delete('/api/readings/cleanup', async (req, res) => {
+  try {
+    const daysToKeep = parseInt(req.query.days) || 7;
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - daysToKeep);
+    
+    const result = await Reading.deleteMany({ receivedAt: { $lt: cutoffDate } });
+    
+    res.json({
+      success: true,
+      message: `Deleted ${result.deletedCount} readings older than ${daysToKeep} days`
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
   }
-  
-  res.json({ success: true, reading: latest });
 });
 
 // Test endpoint
@@ -185,16 +310,25 @@ app.use((req, res) => {
   res.status(404).json({ success: false, error: 'Not found' });
 });
 
-// Vercel serverless function export (REQUIRED FOR VERCEL)
+// Error handler
+app.use((err, req, res, next) => {
+  console.error('Error:', err);
+  res.status(500).json({ success: false, error: err.message });
+});
+
+// Vercel export
 module.exports = app;
 
-// START SERVER (Traditional hosting)
-app.listen(PORT, () => {
-  console.log('\n' + '='.repeat(60));
-  console.log('🌱 PLANT MONITOR API v2.3 (Vercel Ready)');
-  console.log('='.repeat(60));
-  console.log(`🚀 Running on port ${PORT}`);
-  console.log(`📱 Frontend endpoint: /api/sensor-data`);
-  console.log(`📥 ESP32 POST: /api/readings`);
-  console.log('='.repeat(60));
-});
+// Start server
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log('\n' + '='.repeat(60));
+    console.log('🌱 PLANT MONITOR API v3.0 (MongoDB + Alerts)');
+    console.log('='.repeat(60));
+    console.log(`🚀 Running on port ${PORT}`);
+    console.log(`📱 Frontend endpoint: GET /api/sensor-data`);
+    console.log(`📥 ESP32 endpoint: POST /api/readings`);
+    console.log(`🗄️  Database: MongoDB Atlas`);
+    console.log('='.repeat(60));
+  });
+}
