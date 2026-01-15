@@ -99,8 +99,14 @@ app.use(cors({
   origin: [
     'https://plant-monitor-frontend-mu.vercel.app',
     'https://plant-monitor-frontend-chi.vercel.app',
+    /\.vercel\.app$/,  // Allow ALL Vercel preview URLs
     'http://localhost:5173',
-    'http://localhost:3000'
+    'http://localhost:3000',
+    'http://localhost:8080',
+    'http://localhost:8081',  // ← ADDED!
+    'http://localhost:8082',
+    'http://127.0.0.1:5173',
+    'http://127.0.0.1:8081'
   ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Accept', 'Authorization'],
