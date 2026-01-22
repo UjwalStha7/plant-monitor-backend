@@ -1,5 +1,5 @@
 // ============================================================
-// PLANT MONITOR BACKEND - MONGODB + EMAIL ALERTS (IMPROVED)
+// PLANT MONITOR BACKEND - MONGODB + SENDGRID EMAIL ALERTS
 // ============================================================
 
 const express = require('express');
@@ -11,8 +11,7 @@ const app = express();
 // ============== Configuration ==============
 const PORT = process.env.PORT || 3000;
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://plantuser:ukdjs12345@plant-monitoring.vvaq3h6.mongodb.net/plant-monitor?retryWrites=true&w=majority';
-const EMAIL_USER = process.env.EMAIL_USER;
-const EMAIL_PASS = process.env.EMAIL_PASS;
+const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
 const ALERT_EMAIL = 'sthaujwal07@gmail.com';
 
 // ============== MongoDB Connection ==============
@@ -40,41 +39,40 @@ const readingSchema = new mongoose.Schema({
 
 const Reading = mongoose.model('Reading', readingSchema);
 
-// ============== Email Configuration (IMPROVED) ==============
+// ============== SendGrid Email Configuration ==============
 let transporter;
-const emailConfigured = EMAIL_USER && EMAIL_PASS;
+const emailConfigured = SENDGRID_API_KEY && SENDGRID_API_KEY.startsWith('SG.');
 
 if (emailConfigured) {
   try {
     transporter = nodemailer.createTransport({
-      service: 'gmail',
+      host: 'smtp.sendgrid.net',
+      port: 587,
+      secure: false,
       auth: {
-        user: EMAIL_USER,
-        pass: EMAIL_PASS
-      },
-      // Add these for better reliability
-      tls: {
-        rejectUnauthorized: false
+        user: 'apikey', // This is literal 'apikey', don't change
+        pass: SENDGRID_API_KEY
       }
     });
     
     // Verify email configuration on startup
     transporter.verify()
       .then(() => {
-        console.log('✅ Email service is ready!');
+        console.log('✅ SendGrid email service is ready!');
         console.log(`📧 Sending alerts to: ${ALERT_EMAIL}`);
       })
       .catch(error => {
-        console.error('❌ Email verification failed:', error.message);
-        console.error('💡 Please check your EMAIL_USER and EMAIL_PASS environment variables');
-        console.error('💡 Make sure you are using Gmail App Password, not regular password');
+        console.error('❌ SendGrid verification failed:', error.message);
+        console.error('💡 Check your SENDGRID_API_KEY in Render environment variables');
+        console.error('💡 Make sure sender email is verified in SendGrid dashboard');
       });
   } catch (error) {
-    console.error('❌ Failed to create email transporter:', error.message);
+    console.error('❌ Failed to create SendGrid transporter:', error.message);
   }
 } else {
-  console.warn('⚠️ Email alerts DISABLED - Set EMAIL_USER and EMAIL_PASS environment variables');
-  console.warn('💡 Go to Render Dashboard → Environment → Add EMAIL_USER and EMAIL_PASS');
+  console.warn('⚠️ Email alerts DISABLED');
+  console.warn('💡 Set SENDGRID_API_KEY environment variable in Render');
+  console.warn('💡 Get free API key: https://signup.sendgrid.com/');
 }
 
 // Track last alert time to prevent spam
@@ -84,20 +82,16 @@ const ALERT_COOLDOWN = 30 * 60 * 1000; // 30 minutes
 // ✅ Check if it's night time (7 PM - 6 AM in Nepal Time UTC+5:45)
 function isNightTime() {
   const now = new Date();
-  // Convert to Nepal Time (UTC+5:45)
-  const nepalOffset = 5.75 * 60 * 60 * 1000; // 5 hours 45 minutes in milliseconds
+  const nepalOffset = 5.75 * 60 * 60 * 1000;
   const nepalTime = new Date(now.getTime() + nepalOffset);
   const hour = nepalTime.getUTCHours();
-  
-  // Night time: 19:00 (7 PM) to 06:00 (6 AM)
   return hour >= 19 || hour < 6;
 }
 
 async function sendAlert(reading) {
-  // Check if email is configured
   if (!emailConfigured || !transporter) {
-    console.log('⚠️ Email not configured - skipping alert');
-    console.log('💡 Set EMAIL_USER and EMAIL_PASS environment variables to enable alerts');
+    console.log('⚠️ SendGrid not configured - skipping alert');
+    console.log('💡 Set SENDGRID_API_KEY environment variable to enable alerts');
     return;
   }
 
@@ -108,7 +102,6 @@ async function sendAlert(reading) {
     return;
   }
 
-  // Check conditions
   const isNight = isNightTime();
   const shouldSendLDRAlert = reading.lightCondition === 'Bad' && !isNight;
   const shouldSendSoilAlert = reading.soilCondition === 'Bad';
@@ -145,32 +138,31 @@ async function sendAlert(reading) {
     `;
 
     const mailOptions = {
-      from: `"Plant Monitor 🌱" <${EMAIL_USER}>`,
+      from: `"Plant Monitor 🌱" <${ALERT_EMAIL}>`,
       to: ALERT_EMAIL,
       subject,
       html
     };
 
-    console.log('📧 Attempting to send email to:', ALERT_EMAIL);
+    console.log('📧 Attempting to send email via SendGrid to:', ALERT_EMAIL);
     
     const info = await transporter.sendMail(mailOptions);
     
     lastAlertTime = now;
-    console.log('✅ Alert email sent successfully!');
+    console.log('✅ Alert email sent successfully via SendGrid!');
     console.log('📬 Message ID:', info.messageId);
     console.log('📝 Alert Type:', alertMessage);
     
   } catch (error) {
-    console.error('❌ Email sending failed:', error.message);
+    console.error('❌ SendGrid email failed:', error.message);
     console.error('Full error:', error);
     
-    // Helpful error messages
-    if (error.message.includes('Invalid login')) {
-      console.error('💡 TIP: Use Gmail App Password, not your regular password');
-      console.error('💡 Generate App Password: https://myaccount.google.com/apppasswords');
+    if (error.message.includes('Unauthorized')) {
+      console.error('💡 TIP: Check SENDGRID_API_KEY is correct');
     }
-    if (error.message.includes('getaddrinfo')) {
-      console.error('💡 TIP: Check your internet connection');
+    if (error.message.includes('does not have permissions') || error.message.includes('sender')) {
+      console.error('💡 TIP: Verify sender email in SendGrid dashboard');
+      console.error('💡 URL: https://app.sendgrid.com/settings/sender_auth/senders');
     }
   }
 }
@@ -219,11 +211,12 @@ app.get('/', async (req, res) => {
     res.json({
       status: 'online',
       message: '🌱 Plant Monitor API is running!',
-      version: '3.0.0-MONGODB',
+      version: '3.0.0-SENDGRID',
       timestamp: new Date().toISOString(),
       database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+      emailService: 'SendGrid',
       emailConfigured: emailConfigured,
-      emailStatus: emailConfigured ? '✅ Configured' : '⚠️ Not configured - set EMAIL_USER and EMAIL_PASS',
+      emailStatus: emailConfigured ? '✅ SendGrid Configured' : '⚠️ Set SENDGRID_API_KEY',
       isNightTime: isNightTime(),
       statistics: {
         totalReadings,
@@ -304,14 +297,12 @@ app.get('/api/sensor-data', async (req, res) => {
     
     const latest = readings[0];
     
-    // Calculate device status - ESP32 sends data every 1 minute
-    // Consider disconnected if no data for 3 minutes (to account for delays)
     let deviceStatus = 'Disconnected';
     let timeSinceLastReading = null;
     
     if (latest) {
       timeSinceLastReading = Date.now() - new Date(latest.receivedAt).getTime();
-      const threeMinutes = 3 * 60 * 1000; // 3 minutes threshold
+      const threeMinutes = 3 * 60 * 1000;
       deviceStatus = timeSinceLastReading < threeMinutes ? 'Connected' : 'Disconnected';
     }
     
@@ -320,7 +311,7 @@ app.get('/api/sensor-data', async (req, res) => {
       timestamp: new Date().toISOString(),
       count: readings.length,
       deviceStatus,
-      timeSinceLastReading: timeSinceLastReading ? Math.floor(timeSinceLastReading / 1000) : null, // in seconds
+      timeSinceLastReading: timeSinceLastReading ? Math.floor(timeSinceLastReading / 1000) : null,
       latest: latest ? {
         soilValue: latest.soilValue,
         ldrValue: latest.ldrValue,
@@ -392,19 +383,17 @@ app.delete('/api/readings/cleanup', async (req, res) => {
   }
 });
 
-// ✅ NEW: Test email endpoint
+// ✅ Test email endpoint
 app.get('/api/test-email', async (req, res) => {
   if (!emailConfigured || !transporter) {
     return res.json({ 
       success: false, 
-      error: 'Email not configured',
-      tip: 'Set EMAIL_USER and EMAIL_PASS environment variables in Render Dashboard',
+      error: 'SendGrid not configured',
       steps: [
-        '1. Go to Render Dashboard',
-        '2. Select your backend service',
-        '3. Go to Environment tab',
-        '4. Add EMAIL_USER and EMAIL_PASS',
-        '5. Service will auto-redeploy'
+        '1. Sign up: https://signup.sendgrid.com/',
+        '2. Create API Key: https://app.sendgrid.com/settings/api_keys',
+        '3. Verify sender: https://app.sendgrid.com/settings/sender_auth/senders',
+        '4. Add SENDGRID_API_KEY to Render environment variables'
       ]
     });
   }
@@ -430,8 +419,9 @@ app.get('/api/test-email', async (req, res) => {
     
     res.json({ 
       success: true, 
-      message: 'Test email sent! Check your Gmail inbox (or spam folder).',
+      message: '✅ Test email sent via SendGrid! Check your Gmail inbox.',
       sentTo: ALERT_EMAIL,
+      note: 'Check spam folder if not in inbox',
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -448,6 +438,7 @@ app.get('/api/test', (req, res) => {
   res.json({ 
     success: true, 
     message: 'API working! 🎉',
+    emailService: 'SendGrid',
     isNightTime: isNightTime(),
     emailConfigured: emailConfigured,
     timestamp: new Date().toISOString()
@@ -472,14 +463,14 @@ module.exports = app;
 if (require.main === module) {
   app.listen(PORT, () => {
     console.log('\n' + '='.repeat(60));
-    console.log('🌱 PLANT MONITOR API v3.0 (MongoDB + Smart Alerts)');
+    console.log('🌱 PLANT MONITOR API v3.0 (MongoDB + SendGrid Alerts)');
     console.log('='.repeat(60));
     console.log(`🚀 Running on port ${PORT}`);
     console.log(`📱 Frontend endpoint: GET /api/sensor-data`);
     console.log(`📥 ESP32 endpoint: POST /api/readings`);
     console.log(`🗄️  Database: MongoDB Atlas`);
-    console.log(`📧 Email alerts: ${emailConfigured ? '✅ Enabled' : '⚠️ Disabled (set EMAIL_USER and EMAIL_PASS)'}`);
+    console.log(`📧 Email service: SendGrid ${emailConfigured ? '✅ Enabled' : '⚠️ Disabled'}`);
     console.log(`🌙 Night mode: ${isNightTime() ? 'Active' : 'Inactive'} (LDR alerts disabled 7PM-6AM)`);
     console.log('='.repeat(60));
   });
-}
+}g
