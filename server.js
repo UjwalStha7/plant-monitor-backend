@@ -473,4 +473,4 @@ if (require.main === module) {
     console.log(`🌙 Night mode: ${isNightTime() ? 'Active' : 'Inactive'} (LDR alerts disabled 7PM-6AM)`);
     console.log('='.repeat(60));
   });
-}g
+}
