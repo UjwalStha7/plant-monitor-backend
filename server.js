@@ -1,5 +1,5 @@
 // ============================================================
-// PLANT MONITOR BACKEND - MONGODB + EMAIL ALERTS
+// PLANT MONITOR BACKEND - MONGODB + EMAIL ALERTS (IMPROVED)
 // ============================================================
 
 const express = require('express');
@@ -40,23 +40,48 @@ const readingSchema = new mongoose.Schema({
 
 const Reading = mongoose.model('Reading', readingSchema);
 
-// ============== Email Configuration ==============
+// ============== Email Configuration (IMPROVED) ==============
 let transporter;
-if (EMAIL_USER && EMAIL_PASS) {
-  transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user: EMAIL_USER,
-      pass: EMAIL_PASS
-    }
-  });
+const emailConfigured = EMAIL_USER && EMAIL_PASS;
+
+if (emailConfigured) {
+  try {
+    transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: EMAIL_USER,
+        pass: EMAIL_PASS
+      },
+      // Add these for better reliability
+      tls: {
+        rejectUnauthorized: false
+      }
+    });
+    
+    // Verify email configuration on startup
+    transporter.verify()
+      .then(() => {
+        console.log('✅ Email service is ready!');
+        console.log(`📧 Sending alerts to: ${ALERT_EMAIL}`);
+      })
+      .catch(error => {
+        console.error('❌ Email verification failed:', error.message);
+        console.error('💡 Please check your EMAIL_USER and EMAIL_PASS environment variables');
+        console.error('💡 Make sure you are using Gmail App Password, not regular password');
+      });
+  } catch (error) {
+    console.error('❌ Failed to create email transporter:', error.message);
+  }
+} else {
+  console.warn('⚠️ Email alerts DISABLED - Set EMAIL_USER and EMAIL_PASS environment variables');
+  console.warn('💡 Go to Render Dashboard → Environment → Add EMAIL_USER and EMAIL_PASS');
 }
 
 // Track last alert time to prevent spam
 let lastAlertTime = 0;
 const ALERT_COOLDOWN = 30 * 60 * 1000; // 30 minutes
 
-// ✅ NEW: Check if it's night time (7 PM - 6 AM in Nepal Time UTC+5:45)
+// ✅ Check if it's night time (7 PM - 6 AM in Nepal Time UTC+5:45)
 function isNightTime() {
   const now = new Date();
   // Convert to Nepal Time (UTC+5:45)
@@ -69,18 +94,21 @@ function isNightTime() {
 }
 
 async function sendAlert(reading) {
-  if (!transporter) {
-    console.log('⚠️ Email not configured');
+  // Check if email is configured
+  if (!emailConfigured || !transporter) {
+    console.log('⚠️ Email not configured - skipping alert');
+    console.log('💡 Set EMAIL_USER and EMAIL_PASS environment variables to enable alerts');
     return;
   }
 
   const now = Date.now();
   if (now - lastAlertTime < ALERT_COOLDOWN) {
-    console.log('⏳ Alert cooldown active');
+    const waitTime = Math.ceil((ALERT_COOLDOWN - (now - lastAlertTime)) / 1000 / 60);
+    console.log(`⏳ Alert cooldown active - wait ${waitTime} more minutes`);
     return;
   }
 
-  // ✅ NEW: Don't send LDR alerts at night, but ALWAYS send soil alerts
+  // Check conditions
   const isNight = isNightTime();
   const shouldSendLDRAlert = reading.lightCondition === 'Bad' && !isNight;
   const shouldSendSoilAlert = reading.soilCondition === 'Bad';
@@ -102,27 +130,48 @@ async function sendAlert(reading) {
 
     const subject = `🚨 Plant Monitor Alert - ${alertMessage}`;
     const html = `
-      <h2>⚠️ Plant Needs Attention!</h2>
-      <p><strong>Alert Type:</strong> ${alertMessage}</p>
-      <p><strong>Device:</strong> ${reading.deviceId}</p>
-      <p><strong>Soil Condition:</strong> ${reading.soilCondition} (${reading.soilValue})</p>
-      <p><strong>Light Condition:</strong> ${reading.lightCondition} (${reading.ldrValue})${isNight ? ' <em>(Night time - alert disabled)</em>' : ''}</p>
-      <p><strong>Time:</strong> ${new Date(reading.receivedAt).toLocaleString()}</p>
-      <hr>
-      <p><em>Check your plant immediately!</em></p>
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 2px solid #ff6b6b; border-radius: 10px;">
+        <h2 style="color: #ff6b6b;">⚠️ Plant Needs Attention!</h2>
+        <p><strong>Alert Type:</strong> ${alertMessage}</p>
+        <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 15px 0;">
+          <p><strong>Device:</strong> ${reading.deviceId}</p>
+          <p><strong>Soil Condition:</strong> <span style="color: ${reading.soilCondition === 'Bad' ? '#ff6b6b' : '#51cf66'};">${reading.soilCondition}</span> (${reading.soilValue})</p>
+          <p><strong>Light Condition:</strong> <span style="color: ${reading.lightCondition === 'Bad' ? '#ff6b6b' : '#51cf66'};">${reading.lightCondition}</span> (${reading.ldrValue})${isNight ? ' <em>(Night time - alert disabled)</em>' : ''}</p>
+          <p><strong>Time:</strong> ${new Date(reading.receivedAt).toLocaleString('en-NP', { timeZone: 'Asia/Kathmandu' })}</p>
+        </div>
+        <hr style="border: 1px solid #dee2e6;">
+        <p style="color: #ff6b6b; font-weight: bold;"><em>🌱 Check your plant immediately!</em></p>
+      </div>
     `;
 
-    await transporter.sendMail({
-      from: EMAIL_USER,
+    const mailOptions = {
+      from: `"Plant Monitor 🌱" <${EMAIL_USER}>`,
       to: ALERT_EMAIL,
       subject,
       html
-    });
+    };
 
+    console.log('📧 Attempting to send email to:', ALERT_EMAIL);
+    
+    const info = await transporter.sendMail(mailOptions);
+    
     lastAlertTime = now;
-    console.log('📧 Alert email sent!', alertMessage);
+    console.log('✅ Alert email sent successfully!');
+    console.log('📬 Message ID:', info.messageId);
+    console.log('📝 Alert Type:', alertMessage);
+    
   } catch (error) {
-    console.error('❌ Email error:', error.message);
+    console.error('❌ Email sending failed:', error.message);
+    console.error('Full error:', error);
+    
+    // Helpful error messages
+    if (error.message.includes('Invalid login')) {
+      console.error('💡 TIP: Use Gmail App Password, not your regular password');
+      console.error('💡 Generate App Password: https://myaccount.google.com/apppasswords');
+    }
+    if (error.message.includes('getaddrinfo')) {
+      console.error('💡 TIP: Check your internet connection');
+    }
   }
 }
 
@@ -173,6 +222,8 @@ app.get('/', async (req, res) => {
       version: '3.0.0-MONGODB',
       timestamp: new Date().toISOString(),
       database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+      emailConfigured: emailConfigured,
+      emailStatus: emailConfigured ? '✅ Configured' : '⚠️ Not configured - set EMAIL_USER and EMAIL_PASS',
       isNightTime: isNightTime(),
       statistics: {
         totalReadings,
@@ -341,12 +392,64 @@ app.delete('/api/readings/cleanup', async (req, res) => {
   }
 });
 
+// ✅ NEW: Test email endpoint
+app.get('/api/test-email', async (req, res) => {
+  if (!emailConfigured || !transporter) {
+    return res.json({ 
+      success: false, 
+      error: 'Email not configured',
+      tip: 'Set EMAIL_USER and EMAIL_PASS environment variables in Render Dashboard',
+      steps: [
+        '1. Go to Render Dashboard',
+        '2. Select your backend service',
+        '3. Go to Environment tab',
+        '4. Add EMAIL_USER and EMAIL_PASS',
+        '5. Service will auto-redeploy'
+      ]
+    });
+  }
+
+  try {
+    const testReading = {
+      deviceId: 'TEST-DEVICE',
+      soilValue: 100,
+      ldrValue: 50,
+      soilCondition: 'Bad',
+      lightCondition: 'Bad',
+      receivedAt: new Date()
+    };
+
+    // Temporarily bypass cooldown for testing
+    const oldCooldown = lastAlertTime;
+    lastAlertTime = 0;
+    
+    await sendAlert(testReading);
+    
+    // Restore cooldown
+    lastAlertTime = oldCooldown;
+    
+    res.json({ 
+      success: true, 
+      message: 'Test email sent! Check your Gmail inbox (or spam folder).',
+      sentTo: ALERT_EMAIL,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.json({ 
+      success: false, 
+      error: error.message,
+      tip: 'Check Render logs for detailed error messages'
+    });
+  }
+});
+
 // Test endpoint
 app.get('/api/test', (req, res) => {
   res.json({ 
     success: true, 
     message: 'API working! 🎉',
     isNightTime: isNightTime(),
+    emailConfigured: emailConfigured,
     timestamp: new Date().toISOString()
   });
 });
@@ -375,6 +478,7 @@ if (require.main === module) {
     console.log(`📱 Frontend endpoint: GET /api/sensor-data`);
     console.log(`📥 ESP32 endpoint: POST /api/readings`);
     console.log(`🗄️  Database: MongoDB Atlas`);
+    console.log(`📧 Email alerts: ${emailConfigured ? '✅ Enabled' : '⚠️ Disabled (set EMAIL_USER and EMAIL_PASS)'}`);
     console.log(`🌙 Night mode: ${isNightTime() ? 'Active' : 'Inactive'} (LDR alerts disabled 7PM-6AM)`);
     console.log('='.repeat(60));
   });
