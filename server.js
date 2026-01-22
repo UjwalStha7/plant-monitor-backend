@@ -5,7 +5,7 @@
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
-const nodemailer = require('nodemailer');
+const sgMail = require('@sendgrid/mail'); // ✅ Changed from nodemailer
 const app = express();
 
 // ============== Configuration ==============
@@ -13,6 +13,7 @@ const PORT = process.env.PORT || 3000;
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://plantuser:ukdjs12345@plant-monitoring.vvaq3h6.mongodb.net/plant-monitor?retryWrites=true&w=majority';
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
 const ALERT_EMAIL = 'sthaujwal07@gmail.com';
+const SENDER_EMAIL = process.env.SENDER_EMAIL || 'sthaujwal07@gmail.com'; // Must be verified in SendGrid
 
 // ============== MongoDB Connection ==============
 mongoose.connect(MONGODB_URI, {
@@ -40,34 +41,17 @@ const readingSchema = new mongoose.Schema({
 const Reading = mongoose.model('Reading', readingSchema);
 
 // ============== SendGrid Email Configuration ==============
-let transporter;
 const emailConfigured = SENDGRID_API_KEY && SENDGRID_API_KEY.startsWith('SG.');
 
 if (emailConfigured) {
   try {
-    transporter = nodemailer.createTransport({
-      host: 'smtp.sendgrid.net',
-      port: 587,
-      secure: false,
-      auth: {
-        user: 'apikey', // This is literal 'apikey', don't change
-        pass: SENDGRID_API_KEY
-      }
-    });
-    
-    // Verify email configuration on startup
-    transporter.verify()
-      .then(() => {
-        console.log('✅ SendGrid email service is ready!');
-        console.log(`📧 Sending alerts to: ${ALERT_EMAIL}`);
-      })
-      .catch(error => {
-        console.error('❌ SendGrid verification failed:', error.message);
-        console.error('💡 Check your SENDGRID_API_KEY in Render environment variables');
-        console.error('💡 Make sure sender email is verified in SendGrid dashboard');
-      });
+    sgMail.setApiKey(SENDGRID_API_KEY);
+    console.log('✅ SendGrid Web API configured!');
+    console.log(`📧 Sending alerts to: ${ALERT_EMAIL}`);
+    console.log(`📤 Sender email: ${SENDER_EMAIL}`);
+    console.log('💡 Make sure sender email is verified in SendGrid dashboard');
   } catch (error) {
-    console.error('❌ Failed to create SendGrid transporter:', error.message);
+    console.error('❌ Failed to configure SendGrid:', error.message);
   }
 } else {
   console.warn('⚠️ Email alerts DISABLED');
@@ -89,7 +73,7 @@ function isNightTime() {
 }
 
 async function sendAlert(reading) {
-  if (!emailConfigured || !transporter) {
+  if (!emailConfigured) {
     console.log('⚠️ SendGrid not configured - skipping alert');
     console.log('💡 Set SENDGRID_API_KEY environment variable to enable alerts');
     return;
@@ -137,32 +121,38 @@ async function sendAlert(reading) {
       </div>
     `;
 
-    const mailOptions = {
-      from: `"Plant Monitor 🌱" <${ALERT_EMAIL}>`,
+    const msg = {
       to: ALERT_EMAIL,
-      subject,
-      html
+      from: {
+        email: SENDER_EMAIL,
+        name: 'Plant Monitor 🌱'
+      },
+      subject: subject,
+      html: html
     };
 
-    console.log('📧 Attempting to send email via SendGrid to:', ALERT_EMAIL);
+    console.log('📧 Attempting to send email via SendGrid Web API to:', ALERT_EMAIL);
     
-    const info = await transporter.sendMail(mailOptions);
+    await sgMail.send(msg);
     
     lastAlertTime = now;
-    console.log('✅ Alert email sent successfully via SendGrid!');
-    console.log('📬 Message ID:', info.messageId);
+    console.log('✅ Alert email sent successfully via SendGrid Web API!');
     console.log('📝 Alert Type:', alertMessage);
     
   } catch (error) {
-    console.error('❌ SendGrid email failed:', error.message);
-    console.error('Full error:', error);
+    console.error('❌ SendGrid API error:', error.message);
     
-    if (error.message.includes('Unauthorized')) {
-      console.error('💡 TIP: Check SENDGRID_API_KEY is correct');
+    if (error.response) {
+      console.error('Response body:', error.response.body);
     }
-    if (error.message.includes('does not have permissions') || error.message.includes('sender')) {
+    
+    if (error.message.includes('Unauthorized') || error.code === 401) {
+      console.error('💡 TIP: Check SENDGRID_API_KEY is correct in Render environment variables');
+    }
+    if (error.message.includes('sender') || error.code === 403) {
       console.error('💡 TIP: Verify sender email in SendGrid dashboard');
       console.error('💡 URL: https://app.sendgrid.com/settings/sender_auth/senders');
+      console.error(`💡 Current sender: ${SENDER_EMAIL}`);
     }
   }
 }
@@ -211,12 +201,12 @@ app.get('/', async (req, res) => {
     res.json({
       status: 'online',
       message: '🌱 Plant Monitor API is running!',
-      version: '3.0.0-SENDGRID',
+      version: '3.0.1-SENDGRID-WEB-API',
       timestamp: new Date().toISOString(),
       database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-      emailService: 'SendGrid',
+      emailService: 'SendGrid Web API',
       emailConfigured: emailConfigured,
-      emailStatus: emailConfigured ? '✅ SendGrid Configured' : '⚠️ Set SENDGRID_API_KEY',
+      emailStatus: emailConfigured ? '✅ SendGrid Web API Configured' : '⚠️ Set SENDGRID_API_KEY',
       isNightTime: isNightTime(),
       statistics: {
         totalReadings,
@@ -385,7 +375,7 @@ app.delete('/api/readings/cleanup', async (req, res) => {
 
 // ✅ Test email endpoint
 app.get('/api/test-email', async (req, res) => {
-  if (!emailConfigured || !transporter) {
+  if (!emailConfigured) {
     return res.json({ 
       success: false, 
       error: 'SendGrid not configured',
@@ -419,8 +409,9 @@ app.get('/api/test-email', async (req, res) => {
     
     res.json({ 
       success: true, 
-      message: '✅ Test email sent via SendGrid! Check your Gmail inbox.',
+      message: '✅ Test email sent via SendGrid Web API! Check your Gmail inbox.',
       sentTo: ALERT_EMAIL,
+      senderEmail: SENDER_EMAIL,
       note: 'Check spam folder if not in inbox',
       timestamp: new Date().toISOString()
     });
@@ -438,7 +429,7 @@ app.get('/api/test', (req, res) => {
   res.json({ 
     success: true, 
     message: 'API working! 🎉',
-    emailService: 'SendGrid',
+    emailService: 'SendGrid Web API',
     isNightTime: isNightTime(),
     emailConfigured: emailConfigured,
     timestamp: new Date().toISOString()
@@ -463,13 +454,13 @@ module.exports = app;
 if (require.main === module) {
   app.listen(PORT, () => {
     console.log('\n' + '='.repeat(60));
-    console.log('🌱 PLANT MONITOR API v3.0 (MongoDB + SendGrid Alerts)');
+    console.log('🌱 PLANT MONITOR API v3.0.1 (SendGrid Web API)');
     console.log('='.repeat(60));
     console.log(`🚀 Running on port ${PORT}`);
     console.log(`📱 Frontend endpoint: GET /api/sensor-data`);
     console.log(`📥 ESP32 endpoint: POST /api/readings`);
     console.log(`🗄️  Database: MongoDB Atlas`);
-    console.log(`📧 Email service: SendGrid ${emailConfigured ? '✅ Enabled' : '⚠️ Disabled'}`);
+    console.log(`📧 Email service: SendGrid Web API ${emailConfigured ? '✅ Enabled' : '⚠️ Disabled'}`);
     console.log(`🌙 Night mode: ${isNightTime() ? 'Active' : 'Inactive'} (LDR alerts disabled 7PM-6AM)`);
     console.log('='.repeat(60));
   });
